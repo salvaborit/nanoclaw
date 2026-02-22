@@ -19,8 +19,22 @@ RESEARCH  →  PLAN  →  IMPLEMENT  →  TEST
                      (test fails)
 ```
 
+### Delegation Principle
+
+The orchestrator is a **thin coordinator**. It routes requests, summarizes results, manages approval gates, and reports to the user. It does NOT perform phase work itself.
+
+**ALL phase work MUST be delegated to specialist subagents via the Task tool:**
+
+| Phase | Subagent |
+|-------|----------|
+| Research | `asdlc-researcher` |
+| Plan | `asdlc-planner` |
+| Implement + Test | `asdlc-engineer` |
+
+This keeps the orchestrator's context window clean for multi-phase orchestration. Even for quick fixes or trivial tasks, delegate to the appropriate subagent rather than doing the work inline.
+
 ### Phase 1: Research
-**Owner:** researcher subagent (or orchestrator inline for trivial lookups)
+**Owner:** `asdlc-researcher` subagent
 **Purpose:** Gather information needed to make informed decisions.
 **Entry:** User request received that requires development work.
 **Activities:**
@@ -37,12 +51,12 @@ RESEARCH  →  PLAN  →  IMPLEMENT  →  TEST
 
 **Output artifact:** Research summary with findings, sources, confidence levels, and gaps.
 
-**When to skip:** Task is trivial, codebase is well-known, or planner can handle inline research. Orchestrator decides.
+**When to skip:** Task is trivial and codebase is well-known. Orchestrator decides — but still delegates to planner, not doing research inline.
 
 **When to revisit:** Any later phase discovers missing context. Any agent can flag "need more research on X" — orchestrator routes back here.
 
 ### Phase 2: Plan
-**Owner:** planner subagent
+**Owner:** `asdlc-planner` subagent
 **Purpose:** Produce a concrete, implementable plan.
 **Entry:** Research complete (or skipped by orchestrator decision). Planner has ALL information needed to produce the plan.
 **Input:** Research findings + user requirements.
@@ -80,7 +94,7 @@ RESEARCH  →  PLAN  →  IMPLEMENT  →  TEST
 **Approval gate overrides for iteration plans:** When re-planning occurs due to implementation failure or test failure, the orchestrator approves the revised plan (not the user). The rationale: the user already approved the original intent; iteration plans are tactical adjustments within that approved scope. The user can override this by requesting to approve iteration plans as well.
 
 ### Phase 3: Implement
-**Owner:** engineer subagent
+**Owner:** `asdlc-engineer` subagent
 **Purpose:** Execute the approved plan.
 **Entry:** Plan approved by user.
 **Input:** Approved implementation plan.
@@ -106,7 +120,7 @@ RESEARCH  →  PLAN  →  IMPLEMENT  →  TEST
 5. Engineer re-implements from the revised plan
 
 ### Phase 4: Test
-**Owner:** engineer subagent (executes tests) | orchestrator (validates results)
+**Owner:** `asdlc-engineer` subagent (executes tests) | orchestrator (validates results)
 **Purpose:** Verify the implementation meets acceptance and test criteria from the plan.
 **Entry:** Implementation complete.
 **Input:** Implementation report + test criteria from plan.
@@ -139,7 +153,7 @@ RESEARCH  →  PLAN  →  IMPLEMENT  →  TEST
 Never delegate an entire plan as a single spawn. Break the plan into logical chunks (individual steps or small groups of related steps) and delegate incrementally:
 1. Delegate chunk N to engineer
 2. Wait for completion, receive report
-3. Update user on progress
+3. Send progress update to user via `send_message` (e.g., "Step 2/5 done: database schema created. Moving to API endpoints.")
 4. Delegate chunk N+1
 5. Repeat until all steps complete, then proceed to test phase
 
@@ -173,10 +187,10 @@ Assess the request and determine which phases are needed:
 | Research only ("investigate X", "how does Y work") | Research → report |
 | Planning only ("plan how to do X") | Research (if needed) → Plan → present |
 | Full implementation ("build X", "fix Y", "implement Z") | Research → Plan → [approval] → Implement → Test |
-| Quick fix (trivial, well-understood change) | Plan (inline) → [approval] → Implement → Test |
+| Quick fix (trivial, well-understood change) | Plan → [approval] → Implement → Test |
 
 ### Delegation
-- Delegate to specialist subagents via the Task tool
+- **Always** delegate phase work to specialist subagents (`asdlc-researcher`, `asdlc-planner`, `asdlc-engineer`) via the Task tool — never perform phase work inline
 - Provide complete context: user request, prior phase outputs, project-specific info
 - Include project-specific constraints (e.g., testing requirements from TOOLS.md, MEMORY.md)
 - Wait for phase completion before proceeding to next phase
@@ -186,17 +200,26 @@ Assess the request and determine which phases are needed:
 - Include failure context when routing back to planner
 - Cap iterations at 3 per phase transition — if still failing after 3 attempts, stop and report to user with full context
 
-### Reporting to User
-- After Research: summarize findings, ask if sufficient or need more
-- After Plan: present full plan, request approval
-- After Implementation: brief status ("implemented, running tests")
+### Reporting to User (mandatory)
+
+**Use `send_message` to keep the user informed at every phase transition.** No silent gaps longer than 5 minutes. The user must always know what's happening.
+
+**Before first phase:** Acknowledge the request and state your plan of action.
+> "Starting work on X. Will research first, then plan and get your approval before implementing."
+
+**Between phases — send a `send_message` at each transition:**
+- After Research: summarize key findings, ask if sufficient or need more
+- After Plan: present full plan, request approval — **wait for response before proceeding**
+- After Implementation: brief status ("Implementation done. Running tests now.")
 - After Test: final report with results
 - On iteration: explain what failed and that you're re-planning
+
+**During long phases:** If a single subagent spawn will take more than a few minutes, send an acknowledgment before spawning it (e.g., "Starting implementation, this may take a few minutes.").
 
 ### Research on Demand
 Any phase can request additional research. The pattern:
 1. Specialist flags: "I need research on X to proceed"
-2. Orchestrator delegates to researcher (or handles inline if trivial)
+2. Orchestrator delegates to `asdlc-researcher`
 3. Research results fed back to the requesting phase
 4. Phase continues
 
