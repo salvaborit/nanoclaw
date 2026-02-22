@@ -3,6 +3,7 @@ import path from 'path';
 
 import {
   ASSISTANT_NAME,
+  CLAUDE_MODEL,
   DATA_DIR,
   IDLE_TIMEOUT,
   MAIN_GROUP_FOLDER,
@@ -28,6 +29,7 @@ import {
   initDatabase,
   setRegisteredGroup,
   setRouterState,
+  deleteSession,
   setSession,
   storeChatMetadata,
   storeMessage,
@@ -348,6 +350,24 @@ async function startMessageLoop(): Promise<void> {
               TRIGGER_PATTERN.test(m.content.trim()),
             );
             if (!hasTrigger) continue;
+          }
+
+          // Handle /new command — reset session and send greeting
+          const hasNewCmd = groupMessages.some((m) => {
+            const body = m.content.trim().replace(TRIGGER_PATTERN, '').trim();
+            return /^\/new\b/i.test(body);
+          });
+          if (hasNewCmd) {
+            delete sessions[group.folder];
+            deleteSession(group.folder);
+            lastAgentTimestamp[chatJid] =
+              groupMessages[groupMessages.length - 1].timestamp;
+            saveState();
+            await channel.sendMessage(
+              chatJid,
+              `New session started (${CLAUDE_MODEL}). How can I help?`,
+            );
+            continue;
           }
 
           // Pull all messages since lastAgentTimestamp so non-trigger
