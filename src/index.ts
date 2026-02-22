@@ -3,11 +3,14 @@ import path from 'path';
 
 import {
   ASSISTANT_NAME,
+  AVAILABLE_MODELS,
   CLAUDE_MODEL,
   DATA_DIR,
+  getModelDisplay,
   IDLE_TIMEOUT,
   MAIN_GROUP_FOLDER,
   POLL_INTERVAL,
+  resolveModelId,
   TRIGGER_PATTERN,
 } from './config.js';
 import { WhatsAppChannel } from './channels/whatsapp.js';
@@ -264,6 +267,9 @@ async function runAgent(
     : undefined;
 
   try {
+    // Resolve model: per-group override > global default
+    const modelId = resolveModelId(group.containerConfig?.model || CLAUDE_MODEL);
+
     const output = await runContainerAgent(
       group,
       {
@@ -272,6 +278,7 @@ async function runAgent(
         groupFolder: group.folder,
         chatJid,
         isMain,
+        model: modelId,
       },
       (proc, containerName) => queue.registerProcess(chatJid, proc, containerName, group.folder),
       wrappedOnOutput,
@@ -352,20 +359,91 @@ async function startMessageLoop(): Promise<void> {
             if (!hasTrigger) continue;
           }
 
+          // Extract command from the last message (after trigger prefix)
+          const lastMsgBody = groupMessages[groupMessages.length - 1].content
+            .trim()
+            .replace(TRIGGER_PATTERN, '')
+            .trim();
+
           // Handle /new command — reset session and send greeting
-          const hasNewCmd = groupMessages.some((m) => {
-            const body = m.content.trim().replace(TRIGGER_PATTERN, '').trim();
-            return /^\/new\b/i.test(body);
-          });
-          if (hasNewCmd) {
+          if (/^\/new\b/i.test(lastMsgBody)) {
             delete sessions[group.folder];
             deleteSession(group.folder);
             lastAgentTimestamp[chatJid] =
               groupMessages[groupMessages.length - 1].timestamp;
             saveState();
+            const currentModel = getModelDisplay(group.containerConfig?.model || CLAUDE_MODEL);
             await channel.sendMessage(
               chatJid,
-              `New session started (${CLAUDE_MODEL}). How can I help?`,
+              `New session started (${currentModel}). How can I help?`,
+            );
+            continue;
+          }
+
+          // Handle /models command — list available models
+          if (/^\/models\b/i.test(lastMsgBody)) {
+            lastAgentTimestamp[chatJid] =
+              groupMessages[groupMessages.length - 1].timestamp;
+            saveState();
+            const currentGlobal = CLAUDE_MODEL;
+            const currentGroup = group.containerConfig?.model;
+            const activeModel = currentGroup || currentGlobal;
+            const lines = AVAILABLE_MODELS.map((m) => {
+              const isActive = m.id === resolveModelId(activeModel) || m.alias === activeModel;
+              const marker = isActive ? ' ← active' : '';
+              const note = m.note ? ` (${m.note})` : '';
+              return `• *${m.display}*${note} — ${m.alias}${marker}`;
+            });
+            if (currentGroup) {
+              lines.push(`\nGroup override: ${getModelDisplay(currentGroup)}`);
+              lines.push(`Global default: ${getModelDisplay(currentGlobal)}`);
+            }
+            await channel.sendMessage(chatJid, lines.join('\n'));
+            continue;
+          }
+
+          // Handle /model command — switch model for this group
+          const modelMatch = lastMsgBody.match(/^\/model\s+(.+)/i);
+          if (modelMatch) {
+            lastAgentTimestamp[chatJid] =
+              groupMessages[groupMessages.length - 1].timestamp;
+            saveState();
+            const arg = modelMatch[1].trim().toLowerCase();
+
+            if (arg === 'reset') {
+              // Clear per-group override
+              const config = { ...group.containerConfig };
+              delete config.model;
+              const updatedGroup = { ...group, containerConfig: Object.keys(config).length > 0 ? config : undefined };
+              registeredGroups[chatJid] = updatedGroup;
+              setRegisteredGroup(chatJid, updatedGroup);
+              await channel.sendMessage(
+                chatJid,
+                `Model reset to global default: ${getModelDisplay(CLAUDE_MODEL)}`,
+              );
+              continue;
+            }
+
+            const resolvedId = resolveModelId(arg);
+            if (!resolvedId) {
+              const validAliases = AVAILABLE_MODELS.map((m) => m.alias).join(', ');
+              await channel.sendMessage(
+                chatJid,
+                `Unknown model: "${arg}"\nValid options: ${validAliases}\nUse /model reset to clear override.`,
+              );
+              continue;
+            }
+
+            const config = { ...(group.containerConfig || {}), model: resolvedId };
+            const updatedGroup = { ...group, containerConfig: config };
+            registeredGroups[chatJid] = updatedGroup;
+            setRegisteredGroup(chatJid, updatedGroup);
+            // Reset session so the new model takes effect immediately
+            delete sessions[group.folder];
+            deleteSession(group.folder);
+            await channel.sendMessage(
+              chatJid,
+              `Model switched to ${getModelDisplay(resolvedId)}. Session reset.`,
             );
             continue;
           }

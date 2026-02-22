@@ -17,8 +17,41 @@ export const ASSISTANT_NAME =
 export const ASSISTANT_HAS_OWN_NUMBER =
   (process.env.ASSISTANT_HAS_OWN_NUMBER || envConfig.ASSISTANT_HAS_OWN_NUMBER) === 'true';
 export const CLAUDE_MODEL =
-  process.env.CLAUDE_MODEL || envConfig.CLAUDE_MODEL || 'Sonnet';
+  process.env.CLAUDE_MODEL || envConfig.CLAUDE_MODEL || 'sonnet';
 export const POLL_INTERVAL = 2000;
+
+export interface ModelEntry {
+  id: string;
+  alias: string;
+  display: string;
+  note: string;
+}
+
+export const AVAILABLE_MODELS: ModelEntry[] = [
+  { id: 'claude-opus-4-6', alias: 'opus', display: 'Opus 4.6', note: 'Most capable' },
+  { id: 'claude-opus-4-5', alias: 'opus-4-5', display: 'Opus 4.5', note: '' },
+  { id: 'claude-sonnet-4-6', alias: 'sonnet', display: 'Sonnet 4.6', note: 'Default' },
+  { id: 'claude-sonnet-4-5', alias: 'sonnet-4-5', display: 'Sonnet 4.5', note: '' },
+  { id: 'claude-haiku-4-5', alias: 'haiku', display: 'Haiku 4.5', note: 'Fastest' },
+];
+
+/** Resolve a model alias or full ID to a valid model ID. Returns undefined if not found. */
+export function resolveModelId(input: string): string | undefined {
+  const lower = input.toLowerCase().trim();
+  const entry = AVAILABLE_MODELS.find(
+    (m) => m.alias === lower || m.id === lower || m.display.toLowerCase() === lower,
+  );
+  return entry?.id;
+}
+
+/** Get the display name for a model ID or alias. */
+export function getModelDisplay(modelIdOrAlias: string): string {
+  const lower = modelIdOrAlias.toLowerCase().trim();
+  const entry = AVAILABLE_MODELS.find(
+    (m) => m.alias === lower || m.id === lower,
+  );
+  return entry?.display || modelIdOrAlias;
+}
 export const SCHEDULER_POLL_INTERVAL = 60000;
 
 // Absolute paths needed for container mounts

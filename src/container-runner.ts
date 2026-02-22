@@ -43,6 +43,7 @@ export interface ContainerInput {
   isMain: boolean;
   isScheduledTask?: boolean;
   secrets?: Record<string, string>;
+  model?: string; // Claude model ID to use for this invocation
 }
 
 export interface ContainerOutput {
