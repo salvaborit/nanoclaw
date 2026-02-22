@@ -392,10 +392,15 @@ async function runQuery(
   let resultCount = 0;
 
   // Load global CLAUDE.md as additional system context (shared across all groups)
+  // Non-main groups have /workspace/global mounted; main reads from project mount
   const globalClaudeMdPath = '/workspace/global/CLAUDE.md';
+  const globalClaudeMdFallback = '/workspace/project/groups/global/CLAUDE.md';
   let globalClaudeMd: string | undefined;
-  if (!containerInput.isMain && fs.existsSync(globalClaudeMdPath)) {
-    globalClaudeMd = fs.readFileSync(globalClaudeMdPath, 'utf-8');
+  const gPath = fs.existsSync(globalClaudeMdPath) ? globalClaudeMdPath
+    : fs.existsSync(globalClaudeMdFallback) ? globalClaudeMdFallback
+    : null;
+  if (gPath) {
+    globalClaudeMd = fs.readFileSync(gPath, 'utf-8');
   }
 
   // Discover additional directories mounted at /workspace/extra/*
