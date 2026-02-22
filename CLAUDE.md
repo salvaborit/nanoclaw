@@ -50,6 +50,12 @@ launchctl load ~/Library/LaunchAgents/com.nanoclaw.plist
 launchctl unload ~/Library/LaunchAgents/com.nanoclaw.plist
 ```
 
+Logs (when running as a service):
+```bash
+tail -f logs/nanoclaw.log                          # application log
+cat groups/{name}/logs/container-*.log | tail -50   # per-group container logs
+```
+
 ## Container Build Cache
 
 The container buildkit caches the build context aggressively. `--no-cache` alone does NOT invalidate COPY steps — the builder's volume retains stale files. To force a truly clean rebuild, prune the builder then re-run `./container/build.sh`.
