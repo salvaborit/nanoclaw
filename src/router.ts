@@ -1,4 +1,4 @@
-import { Channel, NewMessage } from './types.js';
+import { Channel, FileMessageOptions, NewMessage } from './types.js';
 
 export function escapeXml(s: string): string {
   if (!s) return '';
@@ -34,6 +34,18 @@ export function routeOutbound(
   const channel = channels.find((c) => c.ownsJid(jid) && c.isConnected());
   if (!channel) throw new Error(`No channel for JID: ${jid}`);
   return channel.sendMessage(jid, text);
+}
+
+export function routeOutboundFile(
+  channels: Channel[],
+  jid: string,
+  filePath: string,
+  opts: FileMessageOptions,
+): Promise<void> {
+  const channel = channels.find((c) => c.ownsJid(jid) && c.isConnected());
+  if (!channel) throw new Error(`No channel for JID: ${jid}`);
+  if (!channel.sendFile) throw new Error(`Channel ${channel.name} does not support file sending`);
+  return channel.sendFile(jid, filePath, opts);
 }
 
 export function findChannel(
