@@ -15,6 +15,7 @@ import readline from 'readline';
 import makeWASocket, {
   Browsers,
   DisconnectReason,
+  fetchLatestWaWebVersion,
   makeCacheableSignalKeyStore,
   useMultiFileAuthState,
 } from '@whiskeysockets/baileys';
@@ -53,11 +54,21 @@ async function connectSocket(phoneNumber?: string, isReconnect = false): Promise
     process.exit(0);
   }
 
+  let version: [number, number, number] | undefined;
+  try {
+    const result = await fetchLatestWaWebVersion({});
+    version = result.version;
+    console.log(`  Using WA Web version: ${version.join('.')}`);
+  } catch {
+    console.log('  Could not fetch latest WA version, using default');
+  }
+
   const sock = makeWASocket({
     auth: {
       creds: state.creds,
       keys: makeCacheableSignalKeyStore(state.keys, logger),
     },
+    version,
     printQRInTerminal: false,
     logger,
     browser: Browsers.macOS('Chrome'),
