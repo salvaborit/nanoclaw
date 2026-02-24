@@ -5,6 +5,7 @@ import { CronExpressionParser } from 'cron-parser';
 
 import {
   DATA_DIR,
+  GROUPS_DIR,
   IPC_POLL_INTERVAL,
   MAIN_GROUP_FOLDER,
   TIMEZONE,
@@ -12,10 +13,135 @@ import {
 import { AvailableGroup } from './container-runner.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
 import { logger } from './logger.js';
-import { RegisteredGroup } from './types.js';
+import { FileMessageOptions, RegisteredGroup } from './types.js';
+
+/**
+ * Translate a container-internal path to a validated host path.
+ *
+ * Mount map:
+ *   /workspace/group/   → groups/{sourceGroup}/
+ *   /workspace/global/  → groups/global/
+ *   /workspace/project/ → project root (main group only)
+ *   /workspace/extra/{name}/ → from group's additionalMounts config
+ *
+ * Returns the validated host path, or null if invalid/unauthorized.
+ */
+export function resolveContainerPath(
+  containerPath: string,
+  sourceGroup: string,
+  isMain: boolean,
+  registeredGroups: Record<string, RegisteredGroup>,
+): string | null {
+  // Find the RegisteredGroup config for this source group folder
+  const groupConfig = Object.values(registeredGroups).find(
+    (g) => g.folder === sourceGroup,
+  );
+
+  // Project root is one level above GROUPS_DIR
+  const projectRoot = path.resolve(GROUPS_DIR, '..');
+
+  // Define mount mappings: [containerPrefix, hostBase, requiresMain]
+  const mounts: Array<{ prefix: string; hostBase: string; mainOnly: boolean }> =
+    [
+      {
+        prefix: '/workspace/group/',
+        hostBase: path.join(GROUPS_DIR, sourceGroup),
+        mainOnly: false,
+      },
+      {
+        prefix: '/workspace/global/',
+        hostBase: path.join(GROUPS_DIR, 'global'),
+        mainOnly: false,
+      },
+      {
+        prefix: '/workspace/project/',
+        hostBase: projectRoot,
+        mainOnly: true,
+      },
+    ];
+
+  // Add extra mounts from group config
+  if (groupConfig?.containerConfig?.additionalMounts) {
+    for (const mount of groupConfig.containerConfig.additionalMounts) {
+      const name = mount.containerPath || path.basename(mount.hostPath);
+      const hostPath = mount.hostPath.replace(/^~/, process.env.HOME || '');
+      mounts.push({
+        prefix: `/workspace/extra/${name}/`,
+        hostBase: path.resolve(hostPath),
+        mainOnly: false,
+      });
+    }
+  }
+
+  // Try each mount mapping
+  for (const mount of mounts) {
+    if (!containerPath.startsWith(mount.prefix)) continue;
+
+    // Authorization check
+    if (mount.mainOnly && !isMain) {
+      logger.warn(
+        { containerPath, sourceGroup },
+        'Non-main group attempted to access project mount',
+      );
+      return null;
+    }
+
+    // Resolve the relative portion against the host base
+    const relativePath = containerPath.slice(mount.prefix.length);
+    const hostPath = path.resolve(mount.hostBase, relativePath);
+
+    // Security: verify resolved path stays within the allowed host base
+    const canonicalBase = path.resolve(mount.hostBase) + path.sep;
+    const canonicalHost = path.resolve(hostPath);
+    if (
+      canonicalHost !== path.resolve(mount.hostBase) &&
+      !canonicalHost.startsWith(canonicalBase)
+    ) {
+      logger.warn(
+        { containerPath, hostPath: canonicalHost, allowedBase: canonicalBase },
+        'Path traversal blocked',
+      );
+      return null;
+    }
+
+    // Verify file exists
+    if (!fs.existsSync(canonicalHost)) {
+      logger.warn({ containerPath, hostPath: canonicalHost }, 'File not found');
+      return null;
+    }
+
+    // Security: check symlinks don't escape the allowed directory
+    try {
+      const realPath = fs.realpathSync(canonicalHost);
+      const realBase = fs.realpathSync(mount.hostBase);
+      if (
+        realPath !== realBase &&
+        !realPath.startsWith(realBase + path.sep)
+      ) {
+        logger.warn(
+          { containerPath, realPath, allowedBase: realBase },
+          'Symlink escape blocked',
+        );
+        return null;
+      }
+      return realPath;
+    } catch {
+      logger.warn(
+        { containerPath, hostPath: canonicalHost },
+        'Failed to resolve real path',
+      );
+      return null;
+    }
+  }
+
+  // No mount matched
+  logger.warn({ containerPath }, 'No mount mapping found for container path');
+  return null;
+}
 
 export interface IpcDeps {
   sendMessage: (jid: string, text: string) => Promise<void>;
+  sendFile: (jid: string, hostPath: string, opts: FileMessageOptions) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
   registerGroup: (jid: string, group: RegisteredGroup) => void;
   syncGroupMetadata: (force: boolean) => Promise<void>;
@@ -87,6 +213,48 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   logger.warn(
                     { chatJid: data.chatJid, sourceGroup },
                     'Unauthorized IPC message attempt blocked',
+                  );
+                }
+              } else if (data.type === 'file' && data.chatJid && data.filePath) {
+                // Authorization: verify this group can send to this chatJid
+                const targetGroup = registeredGroups[data.chatJid];
+                if (
+                  isMain ||
+                  (targetGroup && targetGroup.folder === sourceGroup)
+                ) {
+                  const hostPath = resolveContainerPath(
+                    data.filePath,
+                    sourceGroup,
+                    isMain,
+                    registeredGroups,
+                  );
+                  if (hostPath) {
+                    try {
+                      await deps.sendFile(data.chatJid, hostPath, {
+                        fileName: data.fileName,
+                        mimeType: data.mimeType,
+                        caption: data.caption,
+                      });
+                      logger.info(
+                        { chatJid: data.chatJid, sourceGroup, file: path.basename(hostPath) },
+                        'IPC file sent',
+                      );
+                    } catch (err) {
+                      logger.error(
+                        { chatJid: data.chatJid, sourceGroup, file: data.filePath, err },
+                        'Failed to send IPC file',
+                      );
+                    }
+                  } else {
+                    logger.warn(
+                      { filePath: data.filePath, sourceGroup },
+                      'IPC file path rejected (invalid or unauthorized)',
+                    );
+                  }
+                } else {
+                  logger.warn(
+                    { chatJid: data.chatJid, sourceGroup },
+                    'Unauthorized IPC file attempt blocked',
                   );
                 }
               }

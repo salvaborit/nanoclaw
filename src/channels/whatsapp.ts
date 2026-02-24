@@ -17,7 +17,8 @@ import {
   updateChatName,
 } from '../db.js';
 import { logger } from '../logger.js';
-import { Channel, OnInboundMessage, OnChatMetadata, RegisteredGroup } from '../types.js';
+import { guessMimeType, classifyMediaType, validateFileSize } from '../media-utils.js';
+import { Channel, FileMessageOptions, OnInboundMessage, OnChatMetadata, RegisteredGroup } from '../types.js';
 
 const GROUP_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
@@ -37,6 +38,7 @@ export class WhatsAppChannel implements Channel {
   private flushing = false;
   private groupSyncTimerStarted = false;
 
+  private reconnectAttempt = 0;
   private opts: WhatsAppChannelOpts;
 
   constructor(opts: WhatsAppChannelOpts) {
@@ -85,21 +87,21 @@ export class WhatsAppChannel implements Channel {
         logger.info({ reason, shouldReconnect, queuedMessages: this.outgoingQueue.length }, 'Connection closed');
 
         if (shouldReconnect) {
-          logger.info('Reconnecting...');
-          this.connectInternal().catch((err) => {
-            logger.error({ err }, 'Failed to reconnect, retrying in 5s');
-            setTimeout(() => {
-              this.connectInternal().catch((err2) => {
-                logger.error({ err: err2 }, 'Reconnection retry failed');
-              });
-            }, 5000);
-          });
+          const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempt), 60000);
+          logger.info(`Reconnecting in ${delay / 1000}s (attempt ${this.reconnectAttempt + 1})...`);
+          this.reconnectAttempt++;
+          setTimeout(() => {
+            this.connectInternal().catch((err) => {
+              logger.error({ err }, 'Reconnection failed');
+            });
+          }, delay);
         } else {
           logger.info('Logged out. Run /setup to re-authenticate.');
           process.exit(0);
         }
       } else if (connection === 'open') {
         this.connected = true;
+        this.reconnectAttempt = 0;
         logger.info('Connected to WhatsApp');
 
         // Announce availability so WhatsApp relays subsequent presence updates (typing indicators)
@@ -223,6 +225,41 @@ export class WhatsAppChannel implements Channel {
       this.outgoingQueue.push({ jid, text: prefixed });
       logger.warn({ jid, err, queueSize: this.outgoingQueue.length }, 'Failed to send, message queued');
     }
+  }
+
+  async sendFile(jid: string, filePath: string, opts: FileMessageOptions): Promise<void> {
+    if (!this.connected) {
+      throw new Error('WhatsApp not connected -- cannot send file');
+    }
+
+    const mime = opts.mimeType || guessMimeType(filePath);
+    const mediaType = classifyMediaType(mime);
+    const sizeCheck = validateFileSize(filePath, mediaType);
+    if (!sizeCheck.ok) {
+      throw new Error(`File too large: ${sizeCheck.size} bytes exceeds ${mediaType} limit of ${sizeCheck.limit} bytes`);
+    }
+
+    const stream = fs.createReadStream(filePath);
+    const fileName = opts.fileName || path.basename(filePath);
+
+    let content: Record<string, unknown>;
+    switch (mediaType) {
+      case 'image':
+        content = { image: { stream }, caption: opts.caption };
+        break;
+      case 'video':
+        content = { video: { stream }, caption: opts.caption };
+        break;
+      case 'audio':
+        content = { audio: { stream }, ptt: false };
+        break;
+      default: // 'document'
+        content = { document: { stream }, mimetype: mime, fileName, caption: opts.caption };
+        break;
+    }
+
+    await this.sock.sendMessage(jid, content as any);
+    logger.info({ jid, filePath: path.basename(filePath), mediaType, size: sizeCheck.size }, 'File sent');
   }
 
   isConnected(): boolean {

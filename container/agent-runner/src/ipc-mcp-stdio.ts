@@ -63,6 +63,62 @@ server.tool(
 );
 
 server.tool(
+  'send_file',
+  `Send a file (image, document, video, audio) to the user or group via WhatsApp.
+
+The file must already exist at the specified path. Write the file to /workspace/group/ first, then call this tool.
+
+Supported formats:
+- Images: JPG, PNG, GIF, WebP (up to ~16 MB)
+- Videos: MP4, AVI, MOV (up to ~64 MB)
+- Audio: MP3, OGG, WAV (up to ~16 MB)
+- Documents: PDF, DOC, XLS, ZIP, or any file type (up to ~100 MB)
+
+Tips:
+- Use caption to add context (not supported for audio)
+- If mime_type is omitted it will be detected from the file extension
+- File name defaults to the basename of the path`,
+  {
+    file_path: z.string().describe('Absolute path to the file inside the container (e.g., /workspace/group/report.pdf)'),
+    file_name: z.string().optional().describe('Display name for the file (e.g., "Q4 Report.pdf"). Defaults to the file basename.'),
+    mime_type: z.string().optional().describe('MIME type (e.g., "application/pdf"). Auto-detected from extension if omitted.'),
+    caption: z.string().optional().describe('Caption text shown with the file (not supported for audio).'),
+  },
+  async (args) => {
+    // Validate file exists inside the container
+    if (!fs.existsSync(args.file_path)) {
+      return {
+        content: [{ type: 'text' as const, text: `File not found: ${args.file_path}. Write the file first, then call send_file.` }],
+        isError: true,
+      };
+    }
+
+    const stat = fs.statSync(args.file_path);
+    if (!stat.isFile()) {
+      return {
+        content: [{ type: 'text' as const, text: `Path is not a file: ${args.file_path}` }],
+        isError: true,
+      };
+    }
+
+    writeIpcFile(MESSAGES_DIR, {
+      type: 'file',
+      chatJid,
+      groupFolder,
+      filePath: args.file_path,
+      fileName: args.file_name || undefined,
+      mimeType: args.mime_type || undefined,
+      caption: args.caption || undefined,
+      timestamp: new Date().toISOString(),
+    });
+
+    return {
+      content: [{ type: 'text' as const, text: `File queued for sending: ${path.basename(args.file_path)}` }],
+    };
+  },
+);
+
+server.tool(
   'schedule_task',
   `Schedule a recurring or one-time task. The task will run as a full agent with access to all tools.
 
