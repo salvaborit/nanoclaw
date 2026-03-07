@@ -23,7 +23,7 @@ export function stripInternalTags(text: string): string {
 export function formatOutbound(rawText: string): string {
   const text = stripInternalTags(rawText);
   if (!text) return '';
-  return text;
+  return text.replace(/^[A-Za-z][A-Za-z0-9_-]*:\s+/, '');
 }
 
 export function routeOutbound(
