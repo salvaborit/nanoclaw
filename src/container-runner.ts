@@ -152,9 +152,13 @@ function buildVolumeMounts(
   if (fs.existsSync(skillsSrc)) {
     for (const skillDir of fs.readdirSync(skillsSrc)) {
       const srcDir = path.join(skillsSrc, skillDir);
+      // Use stat (not lstat) so symlinks resolve to their target
       if (!fs.statSync(srcDir).isDirectory()) continue;
       const dstDir = path.join(skillsDst, skillDir);
-      fs.cpSync(srcDir, dstDir, { recursive: true });
+      // Dereference symlinks so we copy actual files, not symlink pointers.
+      // Without this, symlinked skills create identical src/dst real paths
+      // on subsequent runs, causing ERR_FS_CP_EINVAL.
+      fs.cpSync(srcDir, dstDir, { recursive: true, dereference: true });
     }
   }
   mounts.push({
