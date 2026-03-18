@@ -32,6 +32,12 @@ Single Node.js process with skill-based channel system. Channels (WhatsApp, Tele
 | `/qodo-pr-resolver` | Fetch and fix Qodo PR review issues interactively or in batch |
 | `/get-qodo-rules` | Load org- and repo-level coding rules from Qodo before code tasks |
 
+## Branching Strategy
+
+- **`main`** — clean mirror of the upstream fork; never commit personal changes here.
+- **`develop`** — active development branch for new features and changes.
+- **`sba`** — personal stable/production branch. Merges from `develop` (new work) and `main` (upstream updates). Treat as the owner's "main".
+
 ## Development
 
 Run commands directly—don't tell the user to run them.
