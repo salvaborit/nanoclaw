@@ -97,6 +97,33 @@ async function connectSocket(
     }, 3000);
   }
 
+  let connectionOpened = false;
+  let credsReceived = false;
+  let exitScheduled = false;
+
+  function tryExit() {
+    if (connectionOpened && credsReceived && !exitScheduled) {
+      exitScheduled = true;
+      // Verify credentials were actually saved before exiting
+      const credsFile = path.join(AUTH_DIR, 'creds.json');
+      setTimeout(() => {
+        if (fs.existsSync(credsFile)) {
+          const creds = JSON.parse(fs.readFileSync(credsFile, 'utf-8'));
+          if (creds.me?.id) {
+            fs.writeFileSync(STATUS_FILE, 'authenticated');
+            console.log('\n✓ Successfully authenticated with WhatsApp!');
+            console.log('  Credentials saved to store/auth/');
+            console.log('  You can now start the NanoClaw service.\n');
+            process.exit(0);
+          }
+        }
+        // Credentials not ready yet, wait more
+        exitScheduled = false;
+        setTimeout(tryExit, 500);
+      }, 500);
+    }
+  }
+
   sock.ev.on('connection.update', (update) => {
     const { connection, lastDisconnect, qr } = update;
 
@@ -113,6 +140,14 @@ async function connectSocket(
     if (connection === 'close') {
       const reason = (lastDisconnect?.error as any)?.output?.statusCode;
 
+      // If we already got credentials, ignore the close - it's probably just
+      // Baileys' init queries failing after successful pairing
+      if (credsReceived) {
+        console.log('\n⟳ Connection closed during init, but credentials saved. Verifying...');
+        tryExit();
+        return;
+      }
+
       if (reason === DisconnectReason.loggedOut) {
         fs.writeFileSync(STATUS_FILE, 'failed:logged_out');
         console.log('\n✗ Logged out. Delete store/auth and try again.');
@@ -123,9 +158,9 @@ async function connectSocket(
         process.exit(1);
       } else if (reason === 515) {
         // 515 = stream error, often happens after pairing succeeds but before
-        // registration completes. Reconnect to finish the handshake.
-        console.log('\n⟳ Stream error (515) after pairing — reconnecting...');
-        connectSocket(phoneNumber, true);
+        // registration completes. Wait briefly then reconnect to finish the handshake.
+        console.log('\n⟳ Stream error (515) after pairing — reconnecting in 2s...');
+        setTimeout(() => connectSocket(phoneNumber, true), 2000);
       } else {
         fs.writeFileSync(STATUS_FILE, `failed:${reason || 'unknown'}`);
         console.log('\n✗ Connection failed. Please try again.');
@@ -134,21 +169,29 @@ async function connectSocket(
     }
 
     if (connection === 'open') {
-      fs.writeFileSync(STATUS_FILE, 'authenticated');
+      connectionOpened = true;
       // Clean up QR file now that we're connected
       try {
         fs.unlinkSync(QR_FILE);
       } catch {}
-      console.log('\n✓ Successfully authenticated with WhatsApp!');
-      console.log('  Credentials saved to store/auth/');
-      console.log('  You can now start the NanoClaw service.\n');
-
-      // Give it a moment to save credentials, then exit
-      setTimeout(() => process.exit(0), 1000);
+      tryExit();
     }
   });
 
-  sock.ev.on('creds.update', saveCreds);
+  sock.ev.on('creds.update', async () => {
+    await saveCreds();
+    // Check if we now have a valid user ID in saved creds
+    const credsFile = path.join(AUTH_DIR, 'creds.json');
+    if (fs.existsSync(credsFile)) {
+      try {
+        const creds = JSON.parse(fs.readFileSync(credsFile, 'utf-8'));
+        if (creds.me?.id) {
+          credsReceived = true;
+          tryExit();
+        }
+      } catch {}
+    }
+  });
 }
 
 async function authenticate(): Promise<void> {

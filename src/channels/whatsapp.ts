@@ -111,10 +111,10 @@ export class WhatsAppChannel implements Channel {
 
         if (shouldReconnect) {
           logger.info('Reconnecting...');
-          this.connectInternal().catch((err) => {
+          this.connectInternal(onFirstOpen).catch((err) => {
             logger.error({ err }, 'Failed to reconnect, retrying in 5s');
             setTimeout(() => {
-              this.connectInternal().catch((err2) => {
+              this.connectInternal(onFirstOpen).catch((err2) => {
                 logger.error({ err: err2 }, 'Reconnection retry failed');
               });
             }, 5000);
@@ -225,6 +225,23 @@ export class WhatsAppChannel implements Channel {
               ? fromMe
               : content.startsWith(`${ASSISTANT_NAME}:`);
 
+            // Check if the bot is mentioned via @mention
+            // WhatsApp mentions use LID JIDs (e.g. 242464526995463@lid),
+            // not phone JIDs. Compare against both bot phone and LID.
+            const botPhone = this.sock.user?.id.split(':')[0];
+            const botLid = this.sock.user?.lid?.split(':')[0];
+            const contextInfo =
+              normalized.extendedTextMessage?.contextInfo ||
+              (normalized as Record<string, unknown>)?.contextInfo;
+            const mentionedJid = (contextInfo as { mentionedJid?: string[] })?.mentionedJid || [];
+            const isMentioned =
+              mentionedJid.length > 0 &&
+              mentionedJid.some(
+                (jid: string) =>
+                  (botPhone && jid.startsWith(botPhone)) ||
+                  (botLid && jid.startsWith(botLid)),
+              );
+
             this.opts.onMessage(chatJid, {
               id: msg.key.id || '',
               chat_jid: chatJid,
@@ -234,6 +251,7 @@ export class WhatsAppChannel implements Channel {
               timestamp,
               is_from_me: fromMe,
               is_bot_message: isBotMessage,
+              is_mentioned: isMentioned,
             });
           }
         } catch (err) {
