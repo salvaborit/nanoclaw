@@ -128,6 +128,18 @@ function createSchema(database: Database.Database): void {
     /* column already exists */
   }
 
+  // Add quoted_content and quoted_sender columns if they don't exist (migration for existing DBs)
+  try {
+    database.exec(
+      `ALTER TABLE messages ADD COLUMN quoted_content TEXT`,
+    );
+    database.exec(
+      `ALTER TABLE messages ADD COLUMN quoted_sender TEXT`,
+    );
+  } catch {
+    /* columns already exist */
+  }
+
   // Add channel and is_group columns if they don't exist (migration for existing DBs)
   try {
     database.exec(`ALTER TABLE chats ADD COLUMN channel TEXT`);
@@ -271,7 +283,7 @@ export function setLastGroupSync(): void {
  */
 export function storeMessage(msg: NewMessage): void {
   db.prepare(
-    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message, is_mentioned) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message, is_mentioned, quoted_content, quoted_sender) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     msg.id,
     msg.chat_jid,
@@ -282,6 +294,8 @@ export function storeMessage(msg: NewMessage): void {
     msg.is_from_me ? 1 : 0,
     msg.is_bot_message ? 1 : 0,
     msg.is_mentioned ? 1 : 0,
+    msg.quoted_content || null,
+    msg.quoted_sender || null,
   );
 }
 
@@ -326,7 +340,7 @@ export function getNewMessages(
   // Subquery takes the N most recent, outer query re-sorts chronologically.
   const sql = `
     SELECT * FROM (
-      SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_mentioned
+      SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_mentioned, quoted_content, quoted_sender
       FROM messages
       WHERE timestamp > ? AND chat_jid IN (${placeholders})
         AND is_bot_message = 0 AND content NOT LIKE ?
@@ -352,6 +366,8 @@ export function getNewMessages(
     timestamp: row.timestamp as string,
     is_from_me: row.is_from_me === 1,
     is_mentioned: row.is_mentioned === 1,
+    quoted_content: (row.quoted_content as string) || undefined,
+    quoted_sender: (row.quoted_sender as string) || undefined,
   }));
 
   let newTimestamp = lastTimestamp;
@@ -373,7 +389,7 @@ export function getMessagesSince(
   // Subquery takes the N most recent, outer query re-sorts chronologically.
   const sql = `
     SELECT * FROM (
-      SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_mentioned
+      SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_mentioned, quoted_content, quoted_sender
       FROM messages
       WHERE chat_jid = ? AND timestamp > ?
         AND is_bot_message = 0 AND content NOT LIKE ?
@@ -396,6 +412,8 @@ export function getMessagesSince(
     timestamp: row.timestamp as string,
     is_from_me: row.is_from_me === 1,
     is_mentioned: row.is_mentioned === 1,
+    quoted_content: (row.quoted_content as string) || undefined,
+    quoted_sender: (row.quoted_sender as string) || undefined,
   }));
 }
 

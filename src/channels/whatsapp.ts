@@ -242,6 +242,24 @@ export class WhatsAppChannel implements Channel {
                   (botLid && jid.startsWith(botLid)),
               );
 
+            // Extract quoted message content if this is a reply
+            let quoted_content: string | undefined;
+            let quoted_sender: string | undefined;
+            const quotedMessage = (contextInfo as { quotedMessage?: Record<string, unknown> })?.quotedMessage;
+            if (quotedMessage) {
+              const normalizedQuoted = normalizeMessageContent(quotedMessage as Parameters<typeof normalizeMessageContent>[0]);
+              quoted_content =
+                normalizedQuoted?.conversation ||
+                normalizedQuoted?.extendedTextMessage?.text ||
+                normalizedQuoted?.imageMessage?.caption ||
+                normalizedQuoted?.videoMessage?.caption ||
+                undefined;
+              const quotedParticipant = (contextInfo as { participant?: string })?.participant;
+              quoted_sender = quotedParticipant
+                ? quotedParticipant.split('@')[0]
+                : undefined;
+            }
+
             this.opts.onMessage(chatJid, {
               id: msg.key.id || '',
               chat_jid: chatJid,
@@ -252,6 +270,8 @@ export class WhatsAppChannel implements Channel {
               is_from_me: fromMe,
               is_bot_message: isBotMessage,
               is_mentioned: isMentioned,
+              quoted_content,
+              quoted_sender,
             });
           }
         } catch (err) {
