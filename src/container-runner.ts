@@ -13,6 +13,7 @@ import {
   DATA_DIR,
   GROUPS_DIR,
   IDLE_TIMEOUT,
+  ONECLI_URL,
   TIMEZONE,
 } from './config.js';
 import { readEnvFile } from './env.js';
@@ -24,8 +25,11 @@ import {
   readonlyMountArgs,
   stopContainer,
 } from './container-runtime.js';
+import { OneCLI } from '@onecli-sh/sdk';
 import { validateAdditionalMounts } from './mount-security.js';
 import { RegisteredGroup } from './types.js';
+
+const onecli = new OneCLI({ url: ONECLI_URL });
 
 // Sentinel markers for robust output parsing (must match agent-runner)
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
@@ -40,6 +44,7 @@ export interface ContainerInput {
   isScheduledTask?: boolean;
   assistantName?: string;
   secrets?: Record<string, string>;
+  imageAttachments?: Array<{ relativePath: string; mediaType: string }>;
 }
 
 export interface ContainerOutput {
@@ -76,7 +81,7 @@ function buildVolumeMounts(
     });
 
     // Shadow .env so the agent cannot read secrets from the mounted project root.
-    // Secrets are passed via stdin instead (see readSecrets()).
+    // Secrets are passed via stdin; OneCLI gateway handles additional credential injection.
     const envFile = path.join(projectRoot, '.env');
     if (fs.existsSync(envFile)) {
       mounts.push({
@@ -228,14 +233,29 @@ function readSecrets(): Record<string, string> {
   ]);
 }
 
-function buildContainerArgs(
+async function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
-): string[] {
+  agentIdentifier?: string,
+): Promise<string[]> {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
 
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
+
+  // OneCLI gateway handles credential injection
+  const onecliApplied = await onecli.applyContainerConfig(args, {
+    addHostMapping: false,
+    agent: agentIdentifier,
+  });
+  if (onecliApplied) {
+    logger.info({ containerName }, 'OneCLI gateway config applied');
+  } else {
+    logger.warn(
+      { containerName },
+      'OneCLI gateway not reachable — container will have no credentials',
+    );
+  }
 
   // Runtime-specific args for host gateway resolution
   args.push(...hostGatewayArgs());
@@ -277,7 +297,15 @@ export async function runContainerAgent(
   const mounts = buildVolumeMounts(group, input.isMain);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
-  const containerArgs = buildContainerArgs(mounts, containerName);
+  // Main group uses the default OneCLI agent; others use their own agent.
+  const agentIdentifier = input.isMain
+    ? undefined
+    : group.folder.toLowerCase().replace(/_/g, '-');
+  const containerArgs = await buildContainerArgs(
+    mounts,
+    containerName,
+    agentIdentifier,
+  );
 
   logger.debug(
     {
@@ -506,10 +534,20 @@ export async function runContainerAgent(
       const isError = code !== 0;
 
       if (isVerbose || isError) {
+        // On error, log input metadata only — not the full prompt.
+        // Full input is only included at verbose level to avoid
+        // persisting user conversation content on every non-zero exit.
+        if (isVerbose) {
+          logLines.push(`=== Input ===`, JSON.stringify(input, null, 2), ``);
+        } else {
+          logLines.push(
+            `=== Input Summary ===`,
+            `Prompt length: ${input.prompt.length} chars`,
+            `Session ID: ${input.sessionId || 'new'}`,
+            ``,
+          );
+        }
         logLines.push(
-          `=== Input ===`,
-          JSON.stringify(input, null, 2),
-          ``,
           `=== Container Args ===`,
           containerArgs.join(' '),
           ``,
@@ -687,7 +725,7 @@ export function writeGroupsSnapshot(
   groupFolder: string,
   isMain: boolean,
   groups: AvailableGroup[],
-  registeredJids: Set<string>,
+  _registeredJids: Set<string>,
 ): void {
   const groupIpcDir = resolveGroupIpcPath(groupFolder);
   fs.mkdirSync(groupIpcDir, { recursive: true });

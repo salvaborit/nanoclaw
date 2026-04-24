@@ -1,15 +1,16 @@
 import fs from 'fs';
 import path from 'path';
 
+import { OneCLI } from '@onecli-sh/sdk';
+
 import {
   ASSISTANT_NAME,
-  CREDENTIAL_PROXY_PORT,
   IDLE_TIMEOUT,
+  ONECLI_URL,
   POLL_INTERVAL,
   TIMEZONE,
   TRIGGER_PATTERN,
 } from './config.js';
-import { startCredentialProxy } from './credential-proxy.js';
 import './channels/index.js';
 import {
   getChannelFactory,
@@ -24,7 +25,6 @@ import {
 import {
   cleanupOrphans,
   ensureContainerRuntimeRunning,
-  PROXY_BIND_HOST,
 } from './container-runtime.js';
 import {
   getAllChats,
@@ -33,7 +33,6 @@ import {
   getAllTasks,
   getMessagesSince,
   getNewMessages,
-  getRegisteredGroup,
   getRouterState,
   initDatabase,
   setRegisteredGroup,
@@ -59,6 +58,7 @@ import {
 } from './sender-allowlist.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
+import { parseImageReferences } from './image.js';
 import { logger } from './logger.js';
 
 // Re-export for backwards compatibility during refactor
@@ -72,6 +72,27 @@ let messageLoopRunning = false;
 
 const channels: Channel[] = [];
 const queue = new GroupQueue();
+
+const onecli = new OneCLI({ url: ONECLI_URL });
+
+function ensureOneCLIAgent(jid: string, group: RegisteredGroup): void {
+  if (group.isMain) return;
+  const identifier = group.folder.toLowerCase().replace(/_/g, '-');
+  onecli.ensureAgent({ name: group.name, identifier }).then(
+    (res) => {
+      logger.info(
+        { jid, identifier, created: res.created },
+        'OneCLI agent ensured',
+      );
+    },
+    (err) => {
+      logger.debug(
+        { jid, identifier, err: String(err) },
+        'OneCLI agent ensure skipped',
+      );
+    },
+  );
+}
 
 function loadState(): void {
   lastTimestamp = getRouterState('last_timestamp') || '';
@@ -112,6 +133,9 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
 
   // Create group folder
   fs.mkdirSync(path.join(groupDir, 'logs'), { recursive: true });
+
+  // Ensure a corresponding OneCLI agent exists (best-effort, non-blocking)
+  ensureOneCLIAgent(jid, group);
 
   logger.info(
     { jid, name: group.name, folder: group.folder },
@@ -181,6 +205,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   }
 
   const prompt = formatMessages(missedMessages, TIMEZONE);
+  const imageAttachments = parseImageReferences(missedMessages);
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
@@ -212,7 +237,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let hadError = false;
   let outputSentToUser = false;
 
-  const output = await runAgent(group, prompt, chatJid, async (result) => {
+  const output = await runAgent(group, prompt, chatJid, imageAttachments, async (result) => {
     // Streaming output callback — called for each agent result
     if (result.result) {
       const raw =
@@ -221,7 +246,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           : JSON.stringify(result.result);
       // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
-      logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
+      logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
       if (text) {
         await channel.sendMessage(chatJid, text);
         outputSentToUser = true;
@@ -269,6 +294,7 @@ async function runAgent(
   group: RegisteredGroup,
   prompt: string,
   chatJid: string,
+  imageAttachments: Array<{ relativePath: string; mediaType: string }>,
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
   const isMain = group.isMain === true;
@@ -320,6 +346,7 @@ async function runAgent(
         chatJid,
         isMain,
         assistantName: ASSISTANT_NAME,
+        ...(imageAttachments.length > 0 && { imageAttachments }),
       },
       (proc, containerName) =>
         queue.registerProcess(chatJid, proc, containerName, group.folder),
@@ -475,18 +502,18 @@ async function main(): Promise<void> {
   initDatabase();
   logger.info('Database initialized');
   loadState();
-  restoreRemoteControl();
 
-  // Start credential proxy (containers route API calls through this)
-  const proxyServer = await startCredentialProxy(
-    CREDENTIAL_PROXY_PORT,
-    PROXY_BIND_HOST,
-  );
+  // Ensure OneCLI agents exist for all registered groups.
+  // Recovers from missed creates (e.g. OneCLI was down at registration time).
+  for (const [jid, group] of Object.entries(registeredGroups)) {
+    ensureOneCLIAgent(jid, group);
+  }
+
+  restoreRemoteControl();
 
   // Graceful shutdown handlers
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutdown signal received');
-    proxyServer.close();
     await queue.shutdown(10000);
     for (const ch of channels) await ch.disconnect();
     process.exit(0);
@@ -632,6 +659,21 @@ async function main(): Promise<void> {
     getAvailableGroups,
     writeGroupsSnapshot: (gf, im, ag, rj) =>
       writeGroupsSnapshot(gf, im, ag, rj),
+    onTasksChanged: () => {
+      const tasks = getAllTasks();
+      const taskRows = tasks.map((t) => ({
+        id: t.id,
+        groupFolder: t.group_folder,
+        prompt: t.prompt,
+        schedule_type: t.schedule_type,
+        schedule_value: t.schedule_value,
+        status: t.status,
+        next_run: t.next_run,
+      }));
+      for (const group of Object.values(registeredGroups)) {
+        writeTasksSnapshot(group.folder, group.isMain === true, taskRows);
+      }
+    },
   });
   queue.setProcessMessagesFn(processGroupMessages);
   recoverPendingMessages();

@@ -9,6 +9,7 @@
 import fs from 'fs';
 import path from 'path';
 import pino from 'pino';
+// @ts-expect-error no type declarations
 import qrcode from 'qrcode-terminal';
 import readline from 'readline';
 
@@ -104,7 +105,6 @@ async function connectSocket(
   function tryExit() {
     if (connectionOpened && credsReceived && !exitScheduled) {
       exitScheduled = true;
-      // Verify credentials were actually saved before exiting
       const credsFile = path.join(AUTH_DIR, 'creds.json');
       setTimeout(() => {
         if (fs.existsSync(credsFile)) {
@@ -117,7 +117,6 @@ async function connectSocket(
             process.exit(0);
           }
         }
-        // Credentials not ready yet, wait more
         exitScheduled = false;
         setTimeout(tryExit, 500);
       }, 500);
@@ -140,8 +139,6 @@ async function connectSocket(
     if (connection === 'close') {
       const reason = (lastDisconnect?.error as any)?.output?.statusCode;
 
-      // If we already got credentials, ignore the close - it's probably just
-      // Baileys' init queries failing after successful pairing
       if (credsReceived) {
         console.log('\n⟳ Connection closed during init, but credentials saved. Verifying...');
         tryExit();
@@ -180,7 +177,6 @@ async function connectSocket(
 
   sock.ev.on('creds.update', async () => {
     await saveCreds();
-    // Check if we now have a valid user ID in saved creds
     const credsFile = path.join(AUTH_DIR, 'creds.json');
     if (fs.existsSync(credsFile)) {
       try {
