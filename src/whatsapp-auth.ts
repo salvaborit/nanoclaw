@@ -140,7 +140,9 @@ async function connectSocket(
       const reason = (lastDisconnect?.error as any)?.output?.statusCode;
 
       if (credsReceived) {
-        console.log('\n⟳ Connection closed during init, but credentials saved. Verifying...');
+        console.log(
+          '\n⟳ Connection closed during init, but credentials saved. Verifying...',
+        );
         tryExit();
         return;
       }
@@ -156,7 +158,9 @@ async function connectSocket(
       } else if (reason === 515) {
         // 515 = stream error, often happens after pairing succeeds but before
         // registration completes. Wait briefly then reconnect to finish the handshake.
-        console.log('\n⟳ Stream error (515) after pairing — reconnecting in 2s...');
+        console.log(
+          '\n⟳ Stream error (515) after pairing — reconnecting in 2s...',
+        );
         setTimeout(() => connectSocket(phoneNumber, true), 2000);
       } else {
         fs.writeFileSync(STATUS_FILE, `failed:${reason || 'unknown'}`);

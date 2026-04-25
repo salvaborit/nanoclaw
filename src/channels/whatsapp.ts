@@ -211,7 +211,11 @@ export class WhatsAppChannel implements Channel {
                 const buffer = await downloadMediaMessage(msg, 'buffer', {});
                 const groupDir = path.join(GROUPS_DIR, groups[chatJid].folder);
                 const caption = normalized?.imageMessage?.caption ?? '';
-                const result = await processImage(buffer as Buffer, groupDir, caption);
+                const result = await processImage(
+                  buffer as Buffer,
+                  groupDir,
+                  caption,
+                );
                 if (result) {
                   content = result.content;
                 }
@@ -241,7 +245,8 @@ export class WhatsAppChannel implements Channel {
             const contextInfo =
               normalized.extendedTextMessage?.contextInfo ||
               (normalized as Record<string, unknown>)?.contextInfo;
-            const mentionedJid = (contextInfo as { mentionedJid?: string[] })?.mentionedJid || [];
+            const mentionedJid =
+              (contextInfo as { mentionedJid?: string[] })?.mentionedJid || [];
             const isMentioned =
               mentionedJid.length > 0 &&
               mentionedJid.some(
@@ -253,16 +258,22 @@ export class WhatsAppChannel implements Channel {
             // Extract quoted message content if this is a reply
             let quoted_content: string | undefined;
             let quoted_sender: string | undefined;
-            const quotedMessage = (contextInfo as { quotedMessage?: Record<string, unknown> })?.quotedMessage;
+            const quotedMessage = (
+              contextInfo as { quotedMessage?: Record<string, unknown> }
+            )?.quotedMessage;
             if (quotedMessage) {
-              const normalizedQuoted = normalizeMessageContent(quotedMessage as Parameters<typeof normalizeMessageContent>[0]);
+              const normalizedQuoted = normalizeMessageContent(
+                quotedMessage as Parameters<typeof normalizeMessageContent>[0],
+              );
               quoted_content =
                 normalizedQuoted?.conversation ||
                 normalizedQuoted?.extendedTextMessage?.text ||
                 normalizedQuoted?.imageMessage?.caption ||
                 normalizedQuoted?.videoMessage?.caption ||
                 undefined;
-              const quotedParticipant = (contextInfo as { participant?: string })?.participant;
+              const quotedParticipant = (
+                contextInfo as { participant?: string }
+              )?.participant;
               quoted_sender = quotedParticipant
                 ? quotedParticipant.split('@')[0]
                 : undefined;
@@ -412,7 +423,9 @@ export class WhatsAppChannel implements Channel {
 
     // Query Baileys' signal repository for the mapping
     try {
-      const pn = await (this.sock.signalRepository as any)?.lidMapping?.getPNForLID(jid);
+      const pn = await (
+        this.sock.signalRepository as any
+      )?.lidMapping?.getPNForLID(jid);
       if (pn) {
         const phoneJid = `${pn.split('@')[0].split(':')[0]}@s.whatsapp.net`;
         this.lidToPhoneMap[lidUser] = phoneJid;

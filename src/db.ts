@@ -130,12 +130,8 @@ function createSchema(database: Database.Database): void {
 
   // Add quoted_content and quoted_sender columns if they don't exist (migration for existing DBs)
   try {
-    database.exec(
-      `ALTER TABLE messages ADD COLUMN quoted_content TEXT`,
-    );
-    database.exec(
-      `ALTER TABLE messages ADD COLUMN quoted_sender TEXT`,
-    );
+    database.exec(`ALTER TABLE messages ADD COLUMN quoted_content TEXT`);
+    database.exec(`ALTER TABLE messages ADD COLUMN quoted_sender TEXT`);
   } catch {
     /* columns already exist */
   }
