@@ -207,11 +207,26 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   const prompt = formatMessages(missedMessages, TIMEZONE);
   const imageAttachments = parseImageReferences(missedMessages);
 
+  // The trigger message — the last unread in this batch. Its sender identity
+  // is threaded to the container via ContainerInput.latestSender so per-group
+  // MCP servers (e.g. the CRM MCP) can attribute writes to the human who
+  // spoke. Caveat: fixed at container spawn — follow-up messages during the
+  // idle window do NOT update it (see SPEC §Risks #3).
+  //
+  // `sender` and `sender_name` are typed non-null in NewMessage but the
+  // underlying SQLite `sender_name` column is nullable and drivers can hand
+  // back null strings (finding #20). Guard both with fallbacks so we never
+  // interpolate "null" into the X-Nanoclaw-Sender header downstream.
+  const triggerMessage = missedMessages[missedMessages.length - 1];
+  const latestSender = {
+    jid: triggerMessage.sender ?? 'unknown@unknown',
+    name: triggerMessage.sender_name ?? 'unknown',
+  };
+
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
   const previousCursor = lastAgentTimestamp[chatJid] || '';
-  lastAgentTimestamp[chatJid] =
-    missedMessages[missedMessages.length - 1].timestamp;
+  lastAgentTimestamp[chatJid] = triggerMessage.timestamp;
   saveState();
 
   logger.info(
@@ -242,6 +257,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     prompt,
     chatJid,
     imageAttachments,
+    latestSender,
     async (result) => {
       // Streaming output callback — called for each agent result
       if (result.result) {
@@ -301,6 +317,7 @@ async function runAgent(
   prompt: string,
   chatJid: string,
   imageAttachments: Array<{ relativePath: string; mediaType: string }>,
+  latestSender: { jid: string; name: string } | undefined,
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
   const isMain = group.isMain === true;
@@ -353,6 +370,7 @@ async function runAgent(
         isMain,
         assistantName: ASSISTANT_NAME,
         ...(imageAttachments.length > 0 && { imageAttachments }),
+        ...(latestSender && { latestSender }),
       },
       (proc, containerName) =>
         queue.registerProcess(chatJid, proc, containerName, group.folder),

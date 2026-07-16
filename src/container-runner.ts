@@ -45,6 +45,16 @@ export interface ContainerInput {
   assistantName?: string;
   secrets?: Record<string, string>;
   imageAttachments?: Array<{ relativePath: string; mediaType: string }>;
+  /**
+   * Sender of the message that triggered this container run. Optional —
+   * downstream MCP servers (e.g. the CRM MCP registered per-group) may echo
+   * this into audit trails. Fixed at container spawn; follow-up messages
+   * piped via IPC during the idle window do NOT update it.
+   *
+   * jid is the raw WhatsApp JID (e.g. `5491133...@s.whatsapp.net`).
+   * name is the display name captured by the channel adapter.
+   */
+  latestSender?: { jid: string; name: string };
 }
 
 export interface ContainerOutput {
@@ -148,6 +158,14 @@ function buildVolumeMounts(
         2,
       ) + '\n',
     );
+  }
+  // settings.json may hold bearer tokens / secrets (e.g. DIMITRIS_CRM_MCP_TOKEN).
+  // Enforce owner-only permissions on every startup so hand-edits or upstream
+  // git checkouts can't leave it world-readable. Review finding #19.
+  try {
+    fs.chmodSync(settingsFile, 0o600);
+  } catch (err) {
+    logger.warn({ err, settingsFile }, 'Failed to chmod 600 on settings.json');
   }
 
   // Sync skills from container/skills/ into each group's .claude/skills/
