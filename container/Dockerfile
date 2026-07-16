@@ -26,6 +26,8 @@ RUN apt-get update && apt-get install -y \
     git \
     jq \
     sqlite3 \
+    openssh-client \
+    postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
 # Set Chromium path for agent-browser

@@ -268,6 +268,10 @@ async function buildContainerArgs(
   if (hostUid != null && hostUid !== 0 && hostUid !== 1000) {
     args.push('--user', `${hostUid}:${hostGid}`);
     args.push('-e', 'HOME=/home/node');
+    // Make the host UID resolvable inside the container so tools like ssh
+    // (which call getpwuid) can start. Read-only bind of /etc/passwd + /etc/group.
+    args.push(...readonlyMountArgs('/etc/passwd', '/etc/passwd'));
+    args.push(...readonlyMountArgs('/etc/group', '/etc/group'));
   }
 
   for (const mount of mounts) {
