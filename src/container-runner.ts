@@ -70,6 +70,81 @@ interface VolumeMount {
   readonly: boolean;
 }
 
+/**
+ * Sync skills into a group's `.claude/skills/` directory in three ordered
+ * phases so the last write wins. Runs on every container spawn.
+ *
+ * 1. Global skills (`container/skills/*`) — synced into every group (unchanged
+ *    legacy behavior).
+ * 2. Per-group skills (`container/group-skills/{groupFolder}/*`) — brings in
+ *    group-scoped skills (e.g. `dimitris` for `dimitris-claw`). No-op when the
+ *    dir is absent, so other groups are unaffected.
+ * 3. Per-group override overlay (`container/group-skill-overrides/{groupFolder}/`)
+ *    — merged LAST so a group's container-specific files (e.g. the dimitris
+ *    `crm-access.md` MCP doc) overwrite the source skill's own copy.
+ *
+ * `roots` is injectable purely so unit tests can point phases at fixtures and a
+ * temp destination without a real container spawn; production callers omit it.
+ *
+ * @param skillsDst   Destination skills dir (`data/sessions/{folder}/.claude/skills`).
+ * @param groupFolder Group folder name, used to scope phases 2 and 3.
+ * @param roots       Optional override roots (testing only).
+ */
+export function syncSkills(
+  skillsDst: string,
+  groupFolder: string,
+  roots: {
+    globalSkills?: string;
+    groupSkills?: string;
+    groupOverrides?: string;
+  } = {},
+): void {
+  const projectRoot = process.cwd();
+  const globalSkills =
+    roots.globalSkills ?? path.join(projectRoot, 'container', 'skills');
+  const groupSkills =
+    roots.groupSkills ??
+    path.join(projectRoot, 'container', 'group-skills', groupFolder);
+  const groupOverrides =
+    roots.groupOverrides ??
+    path.join(projectRoot, 'container', 'group-skill-overrides', groupFolder);
+
+  // Copy each skill directory from a source root into skillsDst.
+  // Dereference symlinks so we copy actual files, not symlink pointers.
+  // Without this, symlinked skills create identical src/dst real paths
+  // on subsequent runs, causing ERR_FS_CP_EINVAL.
+  const copySkillDirs = (srcRoot: string): void => {
+    for (const skillDir of fs.readdirSync(srcRoot)) {
+      const srcDir = path.join(srcRoot, skillDir);
+      // Use stat (not lstat) so symlinks resolve to their target
+      if (!fs.statSync(srcDir).isDirectory()) continue;
+      const dstDir = path.join(skillsDst, skillDir);
+      fs.cpSync(srcDir, dstDir, { recursive: true, dereference: true });
+    }
+  };
+
+  // Phase 1: global skills → every group (unchanged behavior).
+  if (fs.existsSync(globalSkills)) {
+    copySkillDirs(globalSkills);
+  }
+
+  // Phase 2: per-group skills → this group only.
+  if (fs.existsSync(groupSkills)) {
+    copySkillDirs(groupSkills);
+  }
+
+  // Phase 3: per-group override overlay, copied LAST so colliding files
+  // (e.g. dimitris/crm-access.md) overwrite the synced source version while
+  // every non-overridden file stays intact.
+  if (fs.existsSync(groupOverrides)) {
+    fs.cpSync(groupOverrides, skillsDst, {
+      recursive: true,
+      dereference: true,
+      force: true,
+    });
+  }
+}
+
 function buildVolumeMounts(
   group: RegisteredGroup,
   isMain: boolean,
@@ -168,21 +243,10 @@ function buildVolumeMounts(
     logger.warn({ err, settingsFile }, 'Failed to chmod 600 on settings.json');
   }
 
-  // Sync skills from container/skills/ into each group's .claude/skills/
-  const skillsSrc = path.join(process.cwd(), 'container', 'skills');
+  // Sync skills into each group's .claude/skills/: global skills for every
+  // group, plus per-group skills and override overlay scoped to this group.
   const skillsDst = path.join(groupSessionsDir, 'skills');
-  if (fs.existsSync(skillsSrc)) {
-    for (const skillDir of fs.readdirSync(skillsSrc)) {
-      const srcDir = path.join(skillsSrc, skillDir);
-      // Use stat (not lstat) so symlinks resolve to their target
-      if (!fs.statSync(srcDir).isDirectory()) continue;
-      const dstDir = path.join(skillsDst, skillDir);
-      // Dereference symlinks so we copy actual files, not symlink pointers.
-      // Without this, symlinked skills create identical src/dst real paths
-      // on subsequent runs, causing ERR_FS_CP_EINVAL.
-      fs.cpSync(srcDir, dstDir, { recursive: true, dereference: true });
-    }
-  }
+  syncSkills(skillsDst, group.folder);
   mounts.push({
     hostPath: groupSessionsDir,
     containerPath: '/home/node/.claude',
