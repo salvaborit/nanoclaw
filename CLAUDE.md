@@ -83,12 +83,20 @@ Each group's Claude model is configured in `data/sessions/{group}/.claude/settin
 
 ```json
 {
-  "model": "claude-opus-4-5",
+  "model": "claude-sonnet-4-6",
   "env": { ... }
 }
 ```
 
-Valid model values: `claude-opus-4-5`, `claude-sonnet-4-5`, `claude-haiku-4-5`.
+Valid model values (newest → oldest within each tier):
+- **Opus:** `claude-opus-5`, `claude-opus-4-8`, `claude-opus-4-7`, `claude-opus-4-6`, `claude-opus-4-5`
+- **Sonnet:** `claude-sonnet-5`, `claude-sonnet-4-6`, `claude-sonnet-4-5`
+- **Haiku:** `claude-haiku-4-5`
+
+The model is read from this `settings.json` only. A `model` key inside a group's
+`container_config` (DB) is **ignored** — NanoClaw never reads it. A group with no
+`model` set anywhere falls back to the SDK/gateway default, whose behavior (including
+image vision) is not guaranteed — always pin a model explicitly.
 
 ## Troubleshooting
 
