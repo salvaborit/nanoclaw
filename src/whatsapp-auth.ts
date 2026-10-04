@@ -139,6 +139,19 @@ async function connectSocket(
     if (connection === 'close') {
       const reason = (lastDisconnect?.error as any)?.output?.statusCode;
 
+      // 515 = stream error, expected right after pairing succeeds: WhatsApp
+      // requires a restart to finish the handshake. This MUST be handled before
+      // the credsReceived check below — otherwise a 515 that lands after creds
+      // are saved gets swallowed and the required reconnect never happens, so the
+      // socket never reaches 'open' and auth never completes (false timeout).
+      if (reason === 515) {
+        console.log(
+          '\n⟳ Stream error (515) after pairing — reconnecting in 2s...',
+        );
+        setTimeout(() => connectSocket(phoneNumber, true), 2000);
+        return;
+      }
+
       if (credsReceived) {
         console.log(
           '\n⟳ Connection closed during init, but credentials saved. Verifying...',
@@ -155,13 +168,6 @@ async function connectSocket(
         fs.writeFileSync(STATUS_FILE, 'failed:qr_timeout');
         console.log('\n✗ QR code timed out. Please try again.');
         process.exit(1);
-      } else if (reason === 515) {
-        // 515 = stream error, often happens after pairing succeeds but before
-        // registration completes. Wait briefly then reconnect to finish the handshake.
-        console.log(
-          '\n⟳ Stream error (515) after pairing — reconnecting in 2s...',
-        );
-        setTimeout(() => connectSocket(phoneNumber, true), 2000);
       } else {
         fs.writeFileSync(STATUS_FILE, `failed:${reason || 'unknown'}`);
         console.log('\n✗ Connection failed. Please try again.');
@@ -175,6 +181,17 @@ async function connectSocket(
       try {
         fs.unlinkSync(QR_FILE);
       } catch {}
+      // After a 515 reconnect the creds.update may not fire again, so confirm
+      // registration straight from disk — reaching 'open' with a registered
+      // identity is itself proof of a completed link.
+      if (!credsReceived) {
+        try {
+          const creds = JSON.parse(
+            fs.readFileSync(path.join(AUTH_DIR, 'creds.json'), 'utf-8'),
+          );
+          if (creds.me?.id) credsReceived = true;
+        } catch {}
+      }
       tryExit();
     }
   });
