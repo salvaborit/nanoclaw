@@ -433,6 +433,96 @@ describe('GroupQueue', () => {
     await vi.advanceTimersByTimeAsync(10);
   });
 
+  // --- Follow-up IPC payload carries image attachments ---
+
+  // Drive a group into the active+registered state so sendMessage writes.
+  const activateGroup = async (jid: string) => {
+    let resolveProcess: () => void;
+    const processMessages = vi.fn(async () => {
+      await new Promise<void>((resolve) => {
+        resolveProcess = resolve;
+      });
+      return true;
+    });
+    queue.setProcessMessagesFn(processMessages);
+    queue.enqueueMessageCheck(jid);
+    await vi.advanceTimersByTimeAsync(10);
+    queue.registerProcess(jid, {} as any, 'container-1', 'test-group');
+    return () => resolveProcess!();
+  };
+
+  // Read back the JSON payload sendMessage wrote (to the .tmp file).
+  const lastWrittenPayload = async () => {
+    const fs = await import('fs');
+    const writeFileSync = vi.mocked(fs.default.writeFileSync);
+    const tmpWrite = [...writeFileSync.mock.calls]
+      .reverse()
+      .find((call) => typeof call[0] === 'string' && call[0].endsWith('.tmp'));
+    expect(tmpWrite).toBeDefined();
+    return JSON.parse(tmpWrite![1] as string);
+  };
+
+  it('includes imageAttachments in the IPC payload when present', async () => {
+    const release = await activateGroup('group1@g.us');
+
+    const images = [
+      { relativePath: 'attachments/x.jpg', mediaType: 'image/jpeg' },
+    ];
+    const ok = queue.sendMessage('group1@g.us', 'hi', images);
+    expect(ok).toBe(true);
+
+    const payload = await lastWrittenPayload();
+    expect(payload).toEqual({
+      type: 'message',
+      text: 'hi',
+      imageAttachments: images,
+    });
+
+    release();
+    await vi.advanceTimersByTimeAsync(10);
+  });
+
+  it('omits imageAttachments from the IPC payload when absent (byte-identical to text-only)', async () => {
+    const release = await activateGroup('group1@g.us');
+
+    expect(queue.sendMessage('group1@g.us', 'hi')).toBe(true);
+    expect(await lastWrittenPayload()).toEqual({ type: 'message', text: 'hi' });
+
+    release();
+    await vi.advanceTimersByTimeAsync(10);
+  });
+
+  it('carries imageAttachments even when the caption text is empty', async () => {
+    const release = await activateGroup('group1@g.us');
+
+    const images = [
+      { relativePath: 'attachments/solo.jpg', mediaType: 'image/jpeg' },
+    ];
+    // Caption-less image: empty text but real attachments. The payload must
+    // still carry the images so the container does not drop the message.
+    expect(queue.sendMessage('group1@g.us', '', images)).toBe(true);
+    expect(await lastWrittenPayload()).toEqual({
+      type: 'message',
+      text: '',
+      imageAttachments: images,
+    });
+
+    release();
+    await vi.advanceTimersByTimeAsync(10);
+  });
+
+  it('omits imageAttachments when the array is empty (backward compatible)', async () => {
+    const release = await activateGroup('group1@g.us');
+
+    expect(queue.sendMessage('group1@g.us', 'hi', [])).toBe(true);
+    const payload = await lastWrittenPayload();
+    expect(payload).toEqual({ type: 'message', text: 'hi' });
+    expect('imageAttachments' in payload).toBe(false);
+
+    release();
+    await vi.advanceTimersByTimeAsync(10);
+  });
+
   it('preempts when idle arrives with pending tasks', async () => {
     const fs = await import('fs');
     let resolveProcess: () => void;

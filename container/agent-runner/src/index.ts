@@ -41,6 +41,11 @@ interface TextContentBlock {
 }
 type ContentBlock = ImageContentBlock | TextContentBlock;
 
+interface IpcMessage {
+  text: string;
+  imageAttachments?: Array<{ relativePath: string; mediaType: string }>;
+}
+
 interface ContainerOutput {
   status: 'success' | 'error';
   result: string | null;
@@ -295,21 +300,29 @@ function shouldClose(): boolean {
  * Drain all pending IPC input messages.
  * Returns messages found, or empty array.
  */
-function drainIpcInput(): string[] {
+function drainIpcInput(): IpcMessage[] {
   try {
     fs.mkdirSync(IPC_INPUT_DIR, { recursive: true });
     const files = fs.readdirSync(IPC_INPUT_DIR)
       .filter(f => f.endsWith('.json'))
       .sort();
 
-    const messages: string[] = [];
+    const messages: IpcMessage[] = [];
     for (const file of files) {
       const filePath = path.join(IPC_INPUT_DIR, file);
       try {
         const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
         fs.unlinkSync(filePath);
-        if (data.type === 'message' && data.text) {
-          messages.push(data.text);
+        const hasImages =
+          Array.isArray(data.imageAttachments) && data.imageAttachments.length > 0;
+        // Keep the message if it has text OR images. A caption-less image
+        // (empty/absent text) must not be dropped — that is the common case
+        // for this cycle (WhatsApp images sent without a caption).
+        if (data.type === 'message' && (data.text || hasImages)) {
+          messages.push({
+            text: typeof data.text === 'string' ? data.text : '',
+            ...(hasImages && { imageAttachments: data.imageAttachments }),
+          });
         }
       } catch (err) {
         log(`Failed to process input file ${file}: ${err instanceof Error ? err.message : String(err)}`);
@@ -324,10 +337,10 @@ function drainIpcInput(): string[] {
 }
 
 /**
- * Wait for a new IPC message or _close sentinel.
- * Returns the messages as a single string, or null if _close.
+ * Wait for new IPC messages or the _close sentinel.
+ * Returns the drained messages, or null if _close.
  */
-function waitForIpcMessage(): Promise<string | null> {
+function waitForIpcMessage(): Promise<IpcMessage[] | null> {
   return new Promise((resolve) => {
     const poll = () => {
       if (shouldClose()) {
@@ -336,7 +349,7 @@ function waitForIpcMessage(): Promise<string | null> {
       }
       const messages = drainIpcInput();
       if (messages.length > 0) {
-        resolve(messages.join('\n'));
+        resolve(messages);
         return;
       }
       setTimeout(poll, IPC_POLL_MS);
@@ -346,13 +359,53 @@ function waitForIpcMessage(): Promise<string | null> {
 }
 
 /**
+ * Load image attachments from /workspace/group and build base64 image
+ * content blocks. Shared by the cold-start path and the IPC/follow-up path
+ * so both load images identically.
+ */
+function loadImageBlocks(
+  imageAttachments: Array<{ relativePath: string; mediaType: string }>,
+): ContentBlock[] {
+  const blocks: ContentBlock[] = [];
+  for (const img of imageAttachments) {
+    const imgPath = path.join('/workspace/group', img.relativePath);
+    try {
+      const data = fs.readFileSync(imgPath).toString('base64');
+      blocks.push({ type: 'image', source: { type: 'base64', media_type: img.mediaType, data } });
+    } catch (err) {
+      log(`Failed to load image: ${imgPath}`);
+    }
+  }
+  return blocks;
+}
+
+/**
+ * Push an IPC message into the stream, mirroring the cold-start shape:
+ * a text message followed by an image-only multimodal message (when the
+ * message carries attachments).
+ */
+function pushIpcMessage(stream: MessageStream, msg: IpcMessage): void {
+  // Skip the text block entirely for a caption-less image so the model does
+  // not receive an empty user turn before the image.
+  if (msg.text) {
+    stream.push(msg.text);
+  }
+  if (msg.imageAttachments?.length) {
+    const blocks = loadImageBlocks(msg.imageAttachments);
+    if (blocks.length > 0) {
+      stream.pushMultimodal(blocks);
+    }
+  }
+}
+
+/**
  * Run a single query and stream results via writeOutput.
  * Uses MessageStream (AsyncIterable) to keep isSingleUserTurn=false,
  * allowing agent teams subagents to run to completion.
  * Also pipes IPC messages into the stream during the query.
  */
 async function runQuery(
-  prompt: string,
+  initialMessages: IpcMessage[],
   sessionId: string | undefined,
   mcpServerPath: string,
   containerInput: ContainerInput,
@@ -360,23 +413,14 @@ async function runQuery(
   resumeAt?: string,
 ): Promise<{ newSessionId?: string; lastAssistantUuid?: string; closedDuringQuery: boolean }> {
   const stream = new MessageStream();
-  stream.push(prompt);
 
-  // Load image attachments and send as multimodal content blocks
-  if (containerInput.imageAttachments?.length) {
-    const blocks: ContentBlock[] = [];
-    for (const img of containerInput.imageAttachments) {
-      const imgPath = path.join('/workspace/group', img.relativePath);
-      try {
-        const data = fs.readFileSync(imgPath).toString('base64');
-        blocks.push({ type: 'image', source: { type: 'base64', media_type: img.mediaType, data } });
-      } catch (err) {
-        log(`Failed to load image: ${imgPath}`);
-      }
-    }
-    if (blocks.length > 0) {
-      stream.pushMultimodal(blocks);
-    }
+  // Push the initial message(s) using the same per-message shape as the
+  // during-query IPC path (pushIpcMessage): text then an image-only block.
+  // The caller supplies every image via these messages — runQuery never reads
+  // containerInput.imageAttachments directly, so there is no dual source and no
+  // way to accidentally re-send cold-start images on a follow-up query.
+  for (const msg of initialMessages) {
+    pushIpcMessage(stream, msg);
   }
 
   // Poll IPC for follow-up messages and _close sentinel during the query
@@ -392,9 +436,9 @@ async function runQuery(
       return;
     }
     const messages = drainIpcInput();
-    for (const text of messages) {
-      log(`Piping IPC message into active query (${text.length} chars)`);
-      stream.push(text);
+    for (const msg of messages) {
+      log(`Piping IPC message into active query (${msg.text.length} chars)`);
+      pushIpcMessage(stream, msg);
     }
     setTimeout(pollIpcDuringQuery, IPC_POLL_MS);
   };
@@ -546,11 +590,25 @@ async function main(): Promise<void> {
   if (containerInput.isScheduledTask) {
     prompt = `[SCHEDULED TASK - The following message was sent automatically and is not coming directly from the user or group.]\n\n${prompt}`;
   }
+  // Images for the first query: stdin attachments plus any that arrived via
+  // IPC before the container started (folded in from the pending drain below).
+  const firstImages: Array<{ relativePath: string; mediaType: string }> = [
+    ...(containerInput.imageAttachments ?? []),
+  ];
   const pending = drainIpcInput();
   if (pending.length > 0) {
     log(`Draining ${pending.length} pending IPC messages into initial prompt`);
-    prompt += '\n' + pending.join('\n');
+    const pendingText = pending.map((p) => p.text).filter(Boolean).join('\n');
+    if (pendingText) prompt += '\n' + pendingText;
+    firstImages.push(...pending.flatMap((p) => p.imageAttachments ?? []));
   }
+  // The first query is one message: the (folded) prompt plus its images —
+  // identical two-block shape (text then images) to the pre-refactor cold start.
+  // Follow-up queries pass the drained IpcMessage[] straight through so each
+  // message keeps its own text↔image association, matching the during-query path.
+  let nextMessages: IpcMessage[] = [
+    { text: prompt, ...(firstImages.length > 0 && { imageAttachments: firstImages }) },
+  ];
 
   // Query loop: run query → wait for IPC message → run new query → repeat
   let resumeAt: string | undefined;
@@ -558,7 +616,7 @@ async function main(): Promise<void> {
     while (true) {
       log(`Starting query (session: ${sessionId || 'new'}, resumeAt: ${resumeAt || 'latest'})...`);
 
-      const queryResult = await runQuery(prompt, sessionId, mcpServerPath, containerInput, sdkEnv, resumeAt);
+      const queryResult = await runQuery(nextMessages, sessionId, mcpServerPath, containerInput, sdkEnv, resumeAt);
       if (queryResult.newSessionId) {
         sessionId = queryResult.newSessionId;
       }
@@ -579,15 +637,20 @@ async function main(): Promise<void> {
 
       log('Query ended, waiting for next IPC message...');
 
-      // Wait for the next message or _close sentinel
+      // Wait for the next message(s) or _close sentinel
       const nextMessage = await waitForIpcMessage();
       if (nextMessage === null) {
         log('Close sentinel received, exiting');
         break;
       }
 
-      log(`Got new message (${nextMessage.length} chars), starting new query`);
-      prompt = nextMessage;
+      nextMessages = nextMessage;
+      const textChars = nextMessage.reduce((n, m) => n + m.text.length, 0);
+      const imageCount = nextMessage.reduce(
+        (n, m) => n + (m.imageAttachments?.length ?? 0),
+        0,
+      );
+      log(`Got ${nextMessage.length} new message(s) (${textChars} chars, ${imageCount} images), starting new query`);
     }
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : String(err);

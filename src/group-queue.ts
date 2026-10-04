@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { DATA_DIR, MAX_CONCURRENT_CONTAINERS } from './config.js';
+import type { ImageAttachment } from './image.js';
 import { logger } from './logger.js';
 
 interface QueuedTask {
@@ -157,7 +158,11 @@ export class GroupQueue {
    * Send a follow-up message to the active container via IPC file.
    * Returns true if the message was written, false if no active container.
    */
-  sendMessage(groupJid: string, text: string): boolean {
+  sendMessage(
+    groupJid: string,
+    text: string,
+    imageAttachments?: ImageAttachment[],
+  ): boolean {
     const state = this.getGroup(groupJid);
     if (!state.active || !state.groupFolder || state.isTaskContainer)
       return false;
@@ -169,7 +174,16 @@ export class GroupQueue {
       const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}.json`;
       const filepath = path.join(inputDir, filename);
       const tempPath = `${filepath}.tmp`;
-      fs.writeFileSync(tempPath, JSON.stringify({ type: 'message', text }));
+      // Only add imageAttachments when non-empty so the payload stays
+      // byte-identical to the text-only form (backward compatible with
+      // containers running an agent-runner that predates image piping).
+      const payload = {
+        type: 'message',
+        text,
+        ...(imageAttachments &&
+          imageAttachments.length > 0 && { imageAttachments }),
+      };
+      fs.writeFileSync(tempPath, JSON.stringify(payload));
       fs.renameSync(tempPath, filepath);
       return true;
     } catch {

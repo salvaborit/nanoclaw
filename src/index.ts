@@ -470,8 +470,9 @@ async function startMessageLoop(): Promise<void> {
           const messagesToSend =
             allPending.length > 0 ? allPending : groupMessages;
           const formatted = formatMessages(messagesToSend, TIMEZONE);
+          const imageAttachments = parseImageReferences(messagesToSend);
 
-          if (queue.sendMessage(chatJid, formatted)) {
+          if (queue.sendMessage(chatJid, formatted, imageAttachments)) {
             logger.debug(
               { chatJid, count: messagesToSend.length },
               'Piped messages to active container',
